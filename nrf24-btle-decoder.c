@@ -101,6 +101,30 @@ uint32_t CRC16(const uint8_t* data, size_t data_len, uint16_t init_crc)
     return (uint16_t)(crc & 0xffff);
 }
 
+/* Calcualte CRC8-CCITT for the NRF packets. */
+uint8_t CRC8(const uint8_t* data, size_t data_len, uint8_t init_crc)
+{
+    uint8_t i;
+    bool bit;
+    uint8_t c;
+	uint_fast8_t crc=init_crc;
+    while (data_len--) {
+        c = *data++;
+        for (i = 0x80; i > 0; i >>= 1) {
+            bit = crc & 0x80;
+            if (c & i) {
+                bit = !bit;
+            }
+            crc <<= 1;
+            if (bit) {
+                crc ^= 0x07;
+            }
+        }
+        crc &= 0xff;
+    }
+    return (uint8_t)(crc & 0xff);
+}
+
 uint32_t NRFCrc(const uint8_t* data, size_t data_len)
 {
 	/* using custom start value to compensate for non byte aligned message (due to 9 bit PCF) */
@@ -177,7 +201,7 @@ bool DetectPreamble(void){
 	int c;
 
 	/* preamble sequence is based on the 9th symbol (either 0x55555555 or 0xAAAAAAAA) */
-	if (Q(9)){
+	if (Q(8)){
 		for (c=0;c<8;c++){
 			transitions += Q(c)>Q(c+1);
 		}
@@ -312,32 +336,33 @@ bool DecodeNRFPacket(int32_t sample, int srate, int packet_length){
 	PackPacket(packet_addr_l, pcf, packet_data, packet_length, packet_packed);
 
 	/* calculate packet crc */
-	calced_crc=NRFCrc(packet_packed, 7+packet_length);
+	calced_crc=CRC8(packet_packed, 7+packet_length, 0x90);
 
 	/* extract crc */
 	ExtractBytes((6+packet_length)*8+9, tmp_buf, 2);
 	packet_crc = tmp_buf[0]<<8 | tmp_buf[1];
 
 	/* NRF24L01+ packet found, dump information */
-	if (packet_crc==calced_crc){
+	if (1){//packet_crc==calced_crc){
 		gettimeofday(&tv, NULL);
 		printf("%ld.%06ld ", (long)tv.tv_sec, tv.tv_usec);
 		printf("NRF24 Packet start sample %"PRId32", Threshold:%"PRId32", Address: 0x%08"PRIX64" ",sample,g_threshold,packet_addr_l);
-		printf("length:%d, pid:%d, no_ack:%d, CRC:0x%04X data:",packet_length,(pcf&0b110)>>1,pcf&0b1,packet_crc);
+		printf("length:%d, pid:%d, no_ack:%d, calcCRC: 0x%04X CRC:0x%04X data:",packet_length,(pcf&0b110)>>1,pcf&0b1,calced_crc,packet_crc);
 		for (c=0;c<packet_length;c++) printf("%02X ",packet_data[c]);
 		printf("\n");
+		printf("%04X\n", pcf);
 		return true;
 	} else return false;
 }
 
-bool DecodeRawNRFPacket(int32_t sample, int srate, int packet_length){
+bool DecodeRawNRFPacket(int32_t sample, int srate, int packet_length, int crc_length){
 	int c,t;
 	struct timeval tv;
 	uint8_t tmp_buf[50];
 	uint8_t packet_data[500];
 	//uint16_t pcf;
-	uint32_t packet_crc;
-	uint32_t calced_crc;
+	uint32_t packet_crc = 0;
+	uint32_t calced_crc = 0;
 	uint64_t packet_addr_l;
 	uint8_t address_length = 5;
 
@@ -353,26 +378,46 @@ bool DecodeRawNRFPacket(int32_t sample, int srate, int packet_length){
 
 	// Prepare packed bit stream for CRC calculation 
 	ExtractBytes(1*8, tmp_buf, address_length+packet_length);
-	// calculate packet crc */
-	calced_crc=RawNRFCrc(tmp_buf, address_length+packet_length);
 
-	// extract crc 
-	ExtractBytes((1+address_length+packet_length)*8, tmp_buf, 2);
-	packet_crc = tmp_buf[0]<<8 | tmp_buf[1];
+	if(crc_length == 2)
+	{
+		// calculate packet crc 
+		calced_crc=RawNRFCrc(tmp_buf, address_length+packet_length);
+		// extract crc
+		ExtractBytes((1+address_length+packet_length)*8, tmp_buf, 2);
+		packet_crc = tmp_buf[0]<<8 | tmp_buf[1];
+	}
+	else if(crc_length == 1)
+	{
+		// calculate packet crc 
+		calced_crc=CRC8(tmp_buf, address_length+packet_length, 0xFF);
+		// extract crc
+		ExtractBytes((1+address_length+packet_length)*8, tmp_buf, 1);
+		packet_crc = tmp_buf[0];
+	}
+
 
 	// NRF24L01+ packet found, dump information 
-	if (packet_crc==calced_crc){
+	if (1){//!crc_length || packet_crc==calced_crc){
 		gettimeofday(&tv, NULL);
 		printf("%ld.%06ld ", (long)tv.tv_sec, tv.tv_usec);
 		printf("NRF24 Packet start sample %"PRId32", Threshold:%"PRId32", Address: 0x%08"PRIX64" ",sample,g_threshold,packet_addr_l);
-		printf("length:%d, CRC:0x%04X data:",packet_length,packet_crc);
+		printf("length:%d, ", packet_length);
+		if(crc_length == 2)
+		{
+			printf("CRC:0x%04X ", packet_crc);
+		}
+		else if(crc_length == 1)
+		{
+			printf("CRC:0x%02X ", packet_crc);
+		}
 		for (c=0;c<packet_length;c++) printf("%02X ",packet_data[c]);
 		printf("\n");
 		return true;
 	} else return false;
 }
 
-bool DecodePacket(int decode_type, int32_t sample, int srate, int packet_length){
+bool DecodePacket(int decode_type, int32_t sample, int srate, int packet_length, int crc_length){
 	bool packet_detected=false;
 	g_srate=srate;
 	g_threshold = ExtractThreshold();
@@ -388,7 +433,7 @@ bool DecodePacket(int decode_type, int32_t sample, int srate, int packet_length)
 		}
 		// Raw
 		else if (decode_type==3){
-			packet_detected |= DecodeRawNRFPacket(sample, srate, packet_length);
+			packet_detected |= DecodeRawNRFPacket(sample, srate, packet_length, crc_length);
 		}
 	}
 	return packet_detected;
@@ -397,13 +442,14 @@ bool DecodePacket(int decode_type, int32_t sample, int srate, int packet_length)
 void usage(void)
 {
 	fprintf(stderr,
-		"Usage:\tnrf24-btle-decoder [-t raw|nrf|btle] [-d 1|2|8] [-l len] \n\n"
+		"Usage:\tnrf24-btle-decoder [-t raw|nrf|btle] [-d 1|2|8] [-l len] [-c 0|1|2] \n\n"
 		"Important - this program input is a 2M samples per second bitstream generated by rtl_fm or equivalent\n"
 		"            e.g. rtl_fm.exe -f 428m -s 2000k | nrf24-btle-decoder.exe -n -s 3\n\n"
 		"\t[-t packet_type (raw or nrf or btle). defaults to nrf.] \n"
 		"\t[-d downsample_rate (1 for 2mbps , 2 for 1mbps, 8 for 256kbps), default to 2]\n"
 		"\t    using packet type btle implies -d 2\n"
-		"\t[-l len (1-32). Set a fixed packet length] \n");
+		"\t[-l len (1-32). Set a fixed packet length] \n"
+		"\t[-c length of the CRC, default to 2\n");
 	exit(1);
 }
 
@@ -417,12 +463,13 @@ int main (int argc, char**argv){
 	bool optfail=false;
 	int srate=2;
 	int packet_len = 0;
+	int crc_length = 2;
 	#if defined(WIN32)
 		_setmode(_fileno(stdin), _O_BINARY);
 	#endif /* defined(WIN32) */
 
 	printf("nrf24-btle-decoder, decode NRF24L01+ and Bluetooth Low Energy packets using RTL-SDR v0.4\n\n");
-	while ((opt = getopt(argc, argv, "t:d:l:h")) != -1) {
+	while ((opt = getopt(argc, argv, "t:d:l:c:h")) != -1) {
 		switch (opt) {
 		case 't':
 			if (strcmp("nrf", optarg) == 0)	decode_type = 1;
@@ -444,6 +491,13 @@ int main (int argc, char**argv){
 			packet_len = atoi(optarg);
 			if(packet_len < 1 || packet_len > 32){
 				fprintf (stderr, "illegal packet length - %d.\n\n", packet_len);
+				optfail=1;
+			}
+			break;
+		case 'c':
+			crc_length = atoi(optarg);
+			if(crc_length < 0 || crc_length > 2){
+				fprintf (stderr, "illegal CRC length - %d.\n\n", crc_length);
 				optfail=1;
 			}
 			break;
@@ -472,7 +526,7 @@ int main (int argc, char**argv){
 		cursamp  = (int16_t) ( fgetc(stdin) | fgetc(stdin)<<8);
 		RB_inc();
 		RB(0)=(int)cursamp;
-		if (--skipSamples<1)if (DecodePacket(decode_type, ++samples, srate, packet_len)) skipSamples=20;
+		if (--skipSamples<1)if (DecodePacket(decode_type, ++samples, srate, packet_len, crc_length)) skipSamples=20;
 	}
 
 	printf("%"PRId32" samples received in %d seconds \n",samples,(int)(time(NULL)-start_time));
