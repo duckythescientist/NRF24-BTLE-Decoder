@@ -536,11 +536,13 @@ int main (int argc, char**argv){
 	if(decode_type == 3 && packet_len == 0)
 	{
 		printf("Error: packet length must be specified for RAW format\n");
+		return 0;
 	}
 
 	if(decode_type == 1 && crc_length == 0)
 	{
-		printf("")
+		printf("Error: CRC is required for Enhanced Shockburst packets\n");
+		return 0;
 	}
 
 	if (argc < optind || optfail) usage();
